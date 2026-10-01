@@ -1,0 +1,558 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ==========================================
+// 1. TENANCY & USERS
+// ==========================================
+
+model Organization {
+  id              String         @id @default(cuid())
+  name            String
+  slug            String         @unique
+  gstin           String?
+  dlNumber        String?        // Drug License Number
+  logoUrl         String?
+  brandColor      String         @default("#059669")
+  phone           String?
+  email           String?
+  address         String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  stores          Store[]
+  users           User[]
+  products        Product[]
+  categories      Category[]
+  suppliers       Supplier[]
+  customers       Customer[]
+  subscriptions   Subscription[]
+  sales           Sale[]
+  onlineOrders    OnlineOrder[]
+  auditLogs       AuditLog[]
+  stockTransfers  StockTransfer[]
+}
+
+model Store {
+  id              String         @id @default(cuid())
+  organizationId  String
+  organization    Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name            String
+  code            String         // e.g. "MAIN", "BRANCH-02"
+  address         String
+  city            String         @default("New Delhi")
+  state           String         @default("Delhi")
+  pincode         String         @default("110001")
+  phone           String
+  email           String?
+  dlNumber        String?        // Store-specific Drug License
+  gstin           String?        // Store-specific GSTIN
+  is24x7          Boolean        @default(false)
+  openTime        String         @default("09:00")
+  closeTime       String         @default("22:00")
+  deliveryEnabled Boolean        @default(true)
+  deliveryFee     Float          @default(30.0)
+  minOrderValue   Float          @default(100.0)
+  isActive        Boolean        @default(true)
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  locations       Location[]
+  batches         Batch[]
+  purchaseOrders  PurchaseOrder[]
+  sales           Sale[]
+  cashSessions    CashSession[]
+  onlineOrders    OnlineOrder[]
+  userAssignments StoreAssignment[]
+  outgoingTransfers StockTransfer[] @relation("SourceStore")
+  incomingTransfers StockTransfer[] @relation("DestinationStore")
+  ledgerEntries   InventoryLedgerEntry[]
+}
+
+model User {
+  id                  String            @id @default(cuid())
+  organizationId      String
+  organization        Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  email               String            @unique
+  name                String
+  phone               String?
+  passwordHash        String
+  role                String            // "SUPER_ADMIN", "ORG_OWNER", "STORE_MANAGER", "REGISTERED_PHARMACIST", "CASHIER", "INVENTORY_STAFF", "PICKER_DELIVERY"
+  pharmacistRegNo     String?           // Statutory Pharmacy Council Registration Number
+  isActive            Boolean           @default(true)
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+
+  storeAssignments    StoreAssignment[]
+  salesAsCashier      Sale[]            @relation("SaleCashier")
+  salesAsPharmacist   Sale[]            @relation("SalePharmacist")
+  prescriptionsReviewed Prescription[]  @relation("PharmacistReviews")
+  cashSessions        CashSession[]
+  auditLogs           AuditLog[]
+  ledgerEntries       InventoryLedgerEntry[]
+}
+
+model StoreAssignment {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  storeId   String
+  store     Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  isDefault Boolean  @default(false)
+
+  @@unique([userId, storeId])
+}
+
+// ==========================================
+// 2. PRODUCT CATALOGUE
+// ==========================================
+
+model Category {
+  id              String       @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name            String
+  slug            String
+  description     String?
+  icon            String?
+  products        Product[]
+
+  @@unique([organizationId, slug])
+}
+
+model Product {
+  id                  String       @id @default(cuid())
+  organizationId      String
+  organization        Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  categoryId          String?
+  category            Category?    @relation(fields: [categoryId], references: [id])
+  name                String       // e.g. "Dolo 650 Tablet"
+  brandName           String       // e.g. "Dolo"
+  genericName         String       // e.g. "Paracetamol"
+  manufacturer        String       // e.g. "Micro Labs Ltd"
+  dosageForm          String       // "TABLET", "SYRUP", "CAPSULE", "INJECTION", "OINTMENT", "DROPS", "SUSPENSION", "POWDER"
+  strength            String       // e.g. "650 mg"
+  packSize            String       // e.g. "15 Tablets / Strip"
+  unitsPerPack        Int          @default(10) // Conversion ratio (e.g. 10 tablets)
+  hsnCode             String       @default("3004") // Harmonized System Nomenclature for Pharma
+  gstRate             Float        @default(12.0) // 0%, 5%, 12%, 18%
+  schedule            String       @default("OTC") // "OTC", "SCHEDULE_H", "SCHEDULE_H1", "SCHEDULE_X", "NARCOTIC"
+  storageType         String       @default("ROOM_TEMP") // "ROOM_TEMP", "COLD_STORAGE_2_8C", "COOL_DRY"
+  requiresPrescription Boolean     @default(false)
+  mrp                 Float        // Maximum Retail Price
+  sellingPrice        Float        // Selling Price per pack
+  reorderLevel        Int          @default(20)
+  barcode             String?
+  sku                 String?
+  description         String?
+  imageUrl            String?
+  isActive            Boolean      @default(true)
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+
+  batches             Batch[]
+  saleItems           SaleItem[]
+  poItems             PurchaseOrderItem[]
+  onlineOrderItems    OnlineOrderItem[]
+}
+
+// ==========================================
+// 3. SHELF INTELLIGENCE (PHYSICAL TOPOLOGY)
+// ==========================================
+
+model Location {
+  id                    String              @id @default(cuid())
+  storeId               String
+  store                 Store               @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  zone                  String              // e.g. "Ground Floor Counter", "Back Store Room", "Cold Storage Unit"
+  rack                  String              // e.g. "R-01", "R-02"
+  shelf                 String              // e.g. "S-01", "S-02"
+  bin                   String              // e.g. "B-01", "B-02"
+  fullCode              String              // Computed unique code: "GF/R-01/S-02/B-03"
+  pickingOrder          Int                 @default(0) // Walk-sequence order for pick-path optimization
+  temperatureControlled Boolean             @default(false)
+  isRestricted          Boolean             @default(false) // For Schedule X / Narcotics locked bins
+  isActive              Boolean             @default(true)
+  createdAt             DateTime            @default(now())
+
+  batchStock            BatchLocationStock[]
+  ledgerEntries         InventoryLedgerEntry[]
+
+  @@unique([storeId, fullCode])
+}
+
+// ==========================================
+// 4. BATCHES, INVENTORY & LEDGER
+// ==========================================
+
+model Batch {
+  id              String              @id @default(cuid())
+  productId       String
+  product         Product             @relation(fields: [productId], references: [id], onDelete: Cascade)
+  storeId         String
+  store           Store               @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  batchNumber     String              // Manufacturer Batch Number
+  expiryDate      DateTime            // Critical for FEFO
+  mfgDate         DateTime?
+  purchaseCost    Float               // Cost per pack excluding GST
+  mrp             Float               // Maximum Retail Price
+  sellingPrice    Float               // Effective selling price
+  supplierId      String?
+  supplier        Supplier?           @relation(fields: [supplierId], references: [id])
+  status          String              @default("ACTIVE") // "ACTIVE", "QUARANTINED", "EXPIRED", "RECALLED"
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  locationStock   BatchLocationStock[]
+  saleItems       SaleItem[]
+  transferItems   StockTransferItem[]
+  ledgerEntries   InventoryLedgerEntry[]
+  onlineOrderItems OnlineOrderItem[]
+
+  @@unique([storeId, productId, batchNumber])
+}
+
+model BatchLocationStock {
+  id          String   @id @default(cuid())
+  batchId     String
+  batch       Batch    @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  locationId  String
+  location    Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  quantity    Int      @default(0) // Physical count in this specific shelf bin
+  updatedAt   DateTime @updatedAt
+
+  @@unique([batchId, locationId])
+}
+
+model InventoryLedgerEntry {
+  id              String       @id @default(cuid())
+  organizationId  String
+  storeId         String
+  store           Store        @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  batchId         String
+  batch           Batch        @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  locationId      String?
+  location        Location?    @relation(fields: [locationId], references: [id])
+  movementType    String       // "PURCHASE_RECEIPT", "SALE", "SALE_RETURN", "TRANSFER_OUT", "TRANSFER_IN", "ADJUSTMENT", "EXPIRED_DISPOSAL"
+  quantityDelta   Int          // Positive for stock in, Negative for stock out
+  reason          String
+  referenceId     String?      // SaleId, PurchaseOrderId, TransferId
+  userId          String?
+  user            User?        @relation(fields: [userId], references: [id])
+  createdAt       DateTime     @default(now())
+}
+
+// ==========================================
+// 5. SUPPLIERS & PROCUREMENT
+// ==========================================
+
+model Supplier {
+  id              String         @id @default(cuid())
+  organizationId  String
+  organization    Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name            String
+  contactPerson   String?
+  phone           String
+  email           String?
+  gstin           String?
+  dlNumber        String?
+  address         String?
+  paymentTerms    String?        @default("Net 30 Days")
+  balanceAmount   Float          @default(0.0)
+  isActive        Boolean        @default(true)
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  batches         Batch[]
+  purchaseOrders  PurchaseOrder[]
+}
+
+model PurchaseOrder {
+  id              String              @id @default(cuid())
+  organizationId  String
+  storeId         String
+  store           Store               @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  supplierId      String
+  supplier        Supplier            @relation(fields: [supplierId], references: [id])
+  poNumber        String              @unique
+  status          String              @default("DRAFT") // "DRAFT", "ORDERED", "RECEIVED", "CANCELLED"
+  totalAmount     Float               @default(0.0)
+  taxAmount       Float               @default(0.0)
+  netAmount       Float               @default(0.0)
+  notes           String?
+  invoiceNumber   String?             // Supplier's Tax Invoice Number
+  invoiceDate     DateTime?
+  receivedAt      DateTime?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  items           PurchaseOrderItem[]
+}
+
+model PurchaseOrderItem {
+  id              String         @id @default(cuid())
+  purchaseOrderId String
+  purchaseOrder   PurchaseOrder  @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  productId       String
+  product         Product        @relation(fields: [productId], references: [id])
+  batchNumber     String?        // Filled when received
+  expiryDate      DateTime?      // Filled when received
+  allocatedLocationId String?    // Shelf Location allocated
+  quantityOrdered Int
+  quantityReceived Int           @default(0)
+  purchaseCost    Float
+  mrp             Float
+  gstRate         Float          @default(12.0)
+  taxAmount       Float          @default(0.0)
+  totalAmount     Float
+}
+
+// ==========================================
+// 6. POINT OF SALE (POS) & BILLING
+// ==========================================
+
+model Sale {
+  id                    String        @id @default(cuid())
+  organizationId        String
+  organization          Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  storeId               String
+  store                 Store         @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  invoiceNumber         String        @unique // e.g. "INV-2026-DEL-0001"
+  customerName          String?       @default("Counter Customer")
+  customerPhone         String?
+  doctorName            String?       // Required for Schedule H/H1
+  doctorRegNo           String?
+  totalAmount           Float         // Subtotal before tax & discounts
+  discountAmount        Float         @default(0.0)
+  taxAmount             Float         // Total GST (CGST + SGST)
+  netAmount             Float         // Final payable amount
+  paymentStatus         String        @default("PAID") // "PAID", "PARTIALLY_PAID", "CREDIT"
+  paymentMethod         String        @default("CASH") // "CASH", "UPI", "CARD", "SPLIT"
+  cashierId             String
+  cashier               User          @relation("SaleCashier", fields: [cashierId], references: [id])
+  verifiedByPharmacistId String?
+  verifiedByPharmacist  User?         @relation("SalePharmacist", fields: [verifiedByPharmacistId], references: [id])
+  prescriptionNumber    String?
+  notes                 String?
+  isReturned            Boolean       @default(false)
+  createdAt             DateTime      @default(now())
+
+  items                 SaleItem[]
+  payments              SalePayment[]
+}
+
+model SaleItem {
+  id            String    @id @default(cuid())
+  saleId        String
+  sale          Sale      @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  productId     String
+  product       Product   @relation(fields: [productId], references: [id])
+  batchId       String
+  batch         Batch     @relation(fields: [batchId], references: [id])
+  quantity      Int
+  mrp           Float
+  unitPrice     Float
+  discount      Float     @default(0.0)
+  gstRate       Float     @default(12.0)
+  taxAmount     Float
+  totalAmount   Float
+}
+
+model SalePayment {
+  id              String   @id @default(cuid())
+  saleId          String
+  sale            Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  method          String   // "CASH", "UPI", "CARD"
+  amount          Float
+  cashTendered    Float?   // Cash given by customer
+  changeReturned  Float?   // Change returned to customer
+  referenceNumber String?  // UPI transaction ID or Card Auth code
+  createdAt       DateTime @default(now())
+}
+
+model CashSession {
+  id              String    @id @default(cuid())
+  storeId         String
+  store           Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  userId          String
+  user            User      @relation(fields: [userId], references: [id])
+  openingCash     Float
+  closingCash     Float?
+  expectedCash    Float?
+  cashVariance    Float?    // Variance = closingCash - expectedCash
+  status          String    @default("OPEN") // "OPEN", "CLOSED"
+  notes           String?
+  openedAt        DateTime  @default(now())
+  closedAt        DateTime?
+}
+
+// ==========================================
+// 7. INTER-STORE TRANSFERS
+// ==========================================
+
+model StockTransfer {
+  id                  String              @id @default(cuid())
+  organizationId      String
+  organization        Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  fromStoreId         String
+  fromStore           Store               @relation("SourceStore", fields: [fromStoreId], references: [id])
+  toStoreId           String
+  toStore             Store               @relation("DestinationStore", fields: [toStoreId], references: [id])
+  transferNumber      String              @unique
+  status              String              @default("REQUESTED") // "REQUESTED", "APPROVED", "DISPATCHED_IN_TRANSIT", "RECEIVED", "REJECTED"
+  createdById         String
+  receivedById        String?
+  notes               String?
+  dispatchedAt        DateTime?
+  receivedAt          DateTime?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  items               StockTransferItem[]
+}
+
+model StockTransferItem {
+  id                  String        @id @default(cuid())
+  stockTransferId     String
+  stockTransfer       StockTransfer @relation(fields: [stockTransferId], references: [id], onDelete: Cascade)
+  batchId             String
+  batch               Batch         @relation(fields: [batchId], references: [id])
+  quantityRequested   Int
+  quantityDispatched  Int           @default(0)
+  quantityReceived    Int           @default(0)
+  sourceLocationId    String?
+  targetLocationId    String?
+}
+
+// ==========================================
+// 8. CUSTOMER STOREFRONT & ONLINE ORDERS
+// ==========================================
+
+model Customer {
+  id              String            @id @default(cuid())
+  organizationId  String
+  organization    Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name            String
+  phone           String
+  email           String?
+  passwordHash    String?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  addresses       CustomerAddress[]
+  prescriptions   Prescription[]
+  orders          OnlineOrder[]
+
+  @@unique([organizationId, phone])
+}
+
+model CustomerAddress {
+  id          String   @id @default(cuid())
+  customerId  String
+  customer    Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  label       String   @default("Home") // "Home", "Office", "Other"
+  line1       String
+  line2       String?
+  city        String   @default("New Delhi")
+  state       String   @default("Delhi")
+  pincode     String
+  isDefault   Boolean  @default(false)
+}
+
+model Prescription {
+  id              String        @id @default(cuid())
+  customerId      String
+  customer        Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  orderId         String?
+  onlineOrder     OnlineOrder?  @relation(fields: [orderId], references: [id])
+  fileUrl         String        // Upload path / secure identifier
+  fileName        String
+  doctorName      String?
+  patientName     String?
+  status          String        @default("PENDING_REVIEW") // "PENDING_REVIEW", "APPROVED", "REJECTED"
+  reviewedById    String?
+  reviewedBy      User?         @relation("PharmacistReviews", fields: [reviewedById], references: [id])
+  reviewNotes     String?
+  reviewedAt      DateTime?
+  uploadedAt      DateTime      @default(now())
+}
+
+model OnlineOrder {
+  id                  String             @id @default(cuid())
+  organizationId      String
+  organization        Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  storeId             String
+  store               Store              @relation(fields: [storeId], references: [id])
+  customerId          String
+  customer            Customer           @relation(fields: [customerId], references: [id])
+  orderNumber         String             @unique // e.g. "ORD-2026-9021"
+  status              String             @default("PLACED") 
+  // Status flow: "PLACED" -> "AWAITING_PRESCRIPTION_REVIEW" -> "CONFIRMED" -> "PICKING" -> "PACKED" -> "OUT_FOR_DELIVERY" -> "DELIVERED" (or "CANCELLED")
+  fulfillmentType     String             @default("DELIVERY") // "DELIVERY", "PICKUP"
+  deliveryAddress     String?
+  subtotalAmount      Float
+  taxAmount           Float
+  deliveryFee         Float              @default(0.0)
+  totalAmount         Float
+  paymentStatus       String             @default("PENDING") // "PENDING", "PAID", "COD"
+  paymentMethod       String             @default("COD")     // "COD", "RAZORPAY", "UPI"
+  paymentReference    String?
+  isPrescriptionOrder Boolean            @default(false)
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+
+  items               OnlineOrderItem[]
+  prescriptions       Prescription[]
+}
+
+model OnlineOrderItem {
+  id              String      @id @default(cuid())
+  onlineOrderId   String
+  onlineOrder     OnlineOrder @relation(fields: [onlineOrderId], references: [id], onDelete: Cascade)
+  productId       String
+  product         Product     @relation(fields: [productId], references: [id])
+  batchId         String?
+  batch           Batch?      @relation(fields: [batchId], references: [id])
+  quantity        Int
+  unitPrice       Float
+  taxAmount       Float
+  totalAmount     Float
+  isPicked        Boolean     @default(false)
+}
+
+// ==========================================
+// 9. SAAS SUBSCRIPTIONS & AUDIT LOGS
+// ==========================================
+
+model Subscription {
+  id              String       @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  plan            String       @default("SOLO") // "SOLO", "GROWTH", "CHAIN"
+  maxStores       Int          @default(1)
+  status          String       @default("TRIAL") // "TRIAL", "ACTIVE", "PAST_DUE", "CANCELLED"
+  billingCycle    String       @default("MONTHLY") // "MONTHLY", "ANNUAL"
+  amount          Float        @default(1499.0)
+  startsAt        DateTime     @default(now())
+  expiresAt       DateTime
+}
+
+model AuditLog {
+  id              String       @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  storeId         String?
+  userId          String?
+  user            User?        @relation(fields: [userId], references: [id])
+  action          String       // e.g. "PRICE_OVERRIDE", "PRESCRIPTION_REVIEW", "STOCK_ADJUSTMENT"
+  entity          String       // e.g. "Product", "Sale", "Prescription"
+  entityId        String
+  details         String?      // JSON string of change details
+  ipAddress       String?
+  createdAt       DateTime     @default(now())
+}
