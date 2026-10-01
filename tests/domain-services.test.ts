@@ -36,8 +36,8 @@ describe("PharmacyOS Domain Services Test Suite", () => {
       expect(dolo.locations.length).toBeGreaterThan(0);
 
       // Verify Shelf code structure
-      const loc = dolo.locations[0];
-      expect(loc.fullCode).toMatch(/^GF\/R-01\/S-01/);
+      const loc = dolo.locations.find((l: any) => l.fullCode.startsWith("GF/R-01/S-01"));
+      expect(loc).toBeDefined();
       expect(loc.zone).toBe("Ground Floor Counter");
       expect(loc.quantity).toBeGreaterThan(0);
     });

@@ -133,59 +133,63 @@ describe("PharmacyOS Complete Omnichannel Workflows", () => {
   });
 
   it("Workflow 3: Inter-shelf stock relocation preserves balance", async () => {
-    const doloBatches = await InventoryService.getFefoBatches(doloProduct.id, store.id);
-    const batch = doloBatches[0];
-    const sourceLoc = batch.locations[0];
+    const locations = await prisma.location.findMany({ where: { storeId: store.id }, take: 2 });
+    const sourceLoc = locations[0];
+    const targetLoc = locations[1];
 
-    const targetLoc = await prisma.location.findFirstOrThrow({
-      where: {
+    // Create fresh isolated batch with 20 units allocated to sourceLoc
+    const isoBatch = await prisma.batch.create({
+      data: {
+        productId: doloProduct.id,
         storeId: store.id,
-        id: { not: sourceLoc.locationId },
+        batchNumber: `RELOC-${Date.now()}`,
+        expiryDate: new Date("2027-12-31"),
+        purchaseCost: 20.0,
+        mrp: 34.5,
+        sellingPrice: 31.0,
+        status: "ACTIVE",
       },
     });
 
-    const initialSourceQty = sourceLoc.quantity;
-    const existingTarget = await prisma.batchLocationStock.findUnique({
-      where: {
-        batchId_locationId: {
-          batchId: batch.batchId,
-          locationId: targetLoc.id,
-        },
+    await prisma.batchLocationStock.create({
+      data: {
+        batchId: isoBatch.id,
+        locationId: sourceLoc.id,
+        quantity: 20,
       },
     });
-    const initialTargetQty = existingTarget?.quantity || 0;
 
     await InventoryService.transferStockBetweenShelves({
       organizationId: org.id,
       storeId: store.id,
-      batchId: batch.batchId,
-      sourceLocationId: sourceLoc.locationId,
+      batchId: isoBatch.id,
+      sourceLocationId: sourceLoc.id,
       targetLocationId: targetLoc.id,
       quantity: 5,
       reason: "Store front rearrangement",
       userId: pharmacist.id,
     });
 
-    // Check source decreased by 5
+    // Check source decreased to 15
     const updatedSource = await prisma.batchLocationStock.findUniqueOrThrow({
       where: {
         batchId_locationId: {
-          batchId: batch.batchId,
-          locationId: sourceLoc.locationId,
+          batchId: isoBatch.id,
+          locationId: sourceLoc.id,
         },
       },
     });
-    expect(updatedSource.quantity).toBe(initialSourceQty - 5);
+    expect(updatedSource.quantity).toBe(15);
 
-    // Check destination increased by 5
+    // Check destination has 5
     const updatedTarget = await prisma.batchLocationStock.findUniqueOrThrow({
       where: {
         batchId_locationId: {
-          batchId: batch.batchId,
+          batchId: isoBatch.id,
           locationId: targetLoc.id,
         },
       },
     });
-    expect(updatedTarget.quantity).toBe(initialTargetQty + 5);
+    expect(updatedTarget.quantity).toBe(5);
   });
 });
